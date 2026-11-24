@@ -40,6 +40,7 @@ const DEFAULT_RETRY_POLICY: Required<Omit<RetryPolicy, 'timeoutMs'>> = {
 
 const DEFAULT_POLL_INTERVAL_MS = 1500;
 const DEFAULT_POLL_ATTEMPTS = 10;
+const DEFAULT_FEE_BUMP_MULTIPLIER = 2;
 /**
  * Lookups made for a transaction the node rejected with `txBAD_SEQ`, before
  * concluding that it never landed (#765).
@@ -577,7 +578,7 @@ export class TransactionPipeline {
       return result;
     }
 
-    const multiplier = feeBumpOptions.feeBumpMultiplier ?? 2;
+    const multiplier = feeBumpOptions.feeBumpMultiplier ?? DEFAULT_FEE_BUMP_MULTIPLIER;
     if (!Number.isFinite(multiplier) || multiplier <= 1) {
       this.pipelineLogger.warn('Invalid fee-bump multiplier; returning the original timeout');
       return result;
@@ -591,26 +592,12 @@ export class TransactionPipeline {
       // An aborted caller gets no further envelopes.
       if (options?.signal?.aborted) return result;
 
-      const stats = await withRetry(
-        () => this.server.getFeeStats(),
-        options,
-        'submit.feeStats',
-        this.client.timeoutMs,
-      );
-      if (!stats.ok) {
-        this.pipelineLogger.warn('Could not read fee stats for automatic fee bump', {
-          error: stats.error.message,
-        });
-        return result;
-      }
+      const floor = previousBaseFee > BigInt(tx.fee) ? previousBaseFee : BigInt(tx.fee);
+      const estimate = await this.estimateBumpBaseFee(floor, multiplierBps, options);
+      if (estimate === undefined) return result;
 
       try {
-        const feeStats = stats.data.sorobanInclusionFee.p90 || stats.data.inclusionFee.p90;
-        const networkBaseFee = BigInt(feeStats);
-        const baseline = [previousBaseFee, BigInt(tx.fee), networkBaseFee].reduce((max, fee) =>
-          fee > max ? fee : max,
-        );
-        const baseFee = ((baseline * multiplierBps + 9_999n) / 10_000n).toString();
+        const baseFee = estimate.toString();
         const bumped = this.buildFeeBump(tx, { feeSource: feeBumpOptions.feeSource, baseFee });
         if (!bumped.ok) {
           this.pipelineLogger.warn('Automatic fee-bump construction failed', {
@@ -651,6 +638,65 @@ export class TransactionPipeline {
     }
 
     return result;
+  }
+
+  /**
+   * Fee for an automatic fee bump: the higher of `floor` and the network's
+   * current p90 inclusion fee, multiplied by `multiplierBps` (basis points).
+   * Returns `undefined` when fee stats cannot be read, so each caller can
+   * choose its own fallback.
+   */
+  private async estimateBumpBaseFee(
+    floor: bigint,
+    multiplierBps: bigint,
+    options?: SubmitOptions,
+  ): Promise<bigint | undefined> {
+    const stats = await withRetry(
+      () => this.server.getFeeStats(),
+      options,
+      'submit.feeStats',
+      this.client.timeoutMs,
+    );
+    if (!stats.ok) {
+      this.pipelineLogger.warn('Could not read fee stats for automatic fee bump', {
+        error: stats.error.message,
+      });
+      return undefined;
+    }
+
+    try {
+      const networkBaseFee = BigInt(
+        stats.data.sorobanInclusionFee.p90 || stats.data.inclusionFee.p90,
+      );
+      const baseline = floor > networkBaseFee ? floor : networkBaseFee;
+      return (baseline * multiplierBps + 9_999n) / 10_000n;
+    } catch (error) {
+      this.pipelineLogger.warn('Could not read fee stats for automatic fee bump', { error });
+      return undefined;
+    }
+  }
+
+  /**
+   * Base fee for a fee-rejection bump that does not pin `baseFee`. It uses the
+   * same escalation as a timeout bump, computed from current fee stats instead
+   * of the fee the network just rejected (#767). Falls back to the inner fee
+   * when no estimate is available.
+   */
+  private async rejectedBumpBaseFee(
+    inner: Transaction,
+    options: FeeBumpOptions,
+    submitOptions?: SubmitOptions,
+  ): Promise<string> {
+    const multiplier = options.feeBumpMultiplier ?? DEFAULT_FEE_BUMP_MULTIPLIER;
+    if (!Number.isFinite(multiplier) || multiplier <= 1) {
+      return inner.fee;
+    }
+    const estimate = await this.estimateBumpBaseFee(
+      BigInt(inner.fee),
+      BigInt(Math.round(multiplier * 10_000)),
+      submitOptions,
+    );
+    return estimate === undefined ? inner.fee : estimate.toString();
   }
 
   /**
@@ -942,7 +988,12 @@ export class TransactionPipeline {
       prepared.data = freshTx.build();
     }
 
-    const feeBumped = this.buildFeeBump(prepared.data, feeBumpOptions);
+    // A pinned `baseFee` is used as given. Otherwise the escalation reads
+    // current fee stats rather than reusing the fee that was just rejected (#767).
+    const baseFee =
+      feeBumpOptions.baseFee ??
+      (await this.rejectedBumpBaseFee(prepared.data, feeBumpOptions, params.submit));
+    const feeBumped = this.buildFeeBump(prepared.data, { ...feeBumpOptions, baseFee });
     if (!feeBumped.ok) {
       // The escalation is a recovery attempt: if the fee-bump envelope cannot
       // even be built, the caller still needs the reason the original
@@ -958,7 +1009,7 @@ export class TransactionPipeline {
     await this.notifyFeeBump(feeBumpOptions, {
       previousHash: prepared.data.hash().toString('hex'),
       hash: feeBumped.data.hash().toString('hex'),
-      baseFee: feeBumpOptions.baseFee ?? prepared.data.fee,
+      baseFee,
       attempt: 1,
       reason: 'fee-rejection',
     });

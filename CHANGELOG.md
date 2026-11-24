@@ -6,6 +6,7 @@
 
 - Issue #765: A resubmitted envelope that the node rejects with `txBAD_SEQ` now resolves as success when a lookup shows an earlier broadcast of it landed. `submit()` returns that ledger, so an idempotent retry no longer throws. Before, `run()` treated the rejection as a stale sequence and rebuilt a new transaction, which could run the operation a second time. An envelope that is not on ledger keeps its `SUBMISSION_ERROR`.
 - Issue #766: Added `SubmitOptions.signal`. Aborting it stops confirmation polling, including the wait between polls, and sends no further fee-bump envelopes. The submission resolves with a `SUBMISSION_ERROR` that names the hash, and the transaction may still confirm. Before, the polling loop kept calling RPC after the caller had moved on. `run()` also stops before rebuilding or fee-bumping once its signal aborts.
+- Issue #767: A fee-rejection bump with no pinned `baseFee` now escalates from current fee stats, using the same formula as a timeout bump. Before, it reused the rejected fee, which could be too low when congestion was rising. A pinned `baseFee` is still used unchanged. If fee stats can't be read, the bump falls back to the rejected fee, as before.
 
 ### Dispute status polling, deadline validation and Node entry spike (#711, #780, #781, #783)
 

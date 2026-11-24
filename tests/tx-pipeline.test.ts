@@ -418,6 +418,12 @@ describe('TransactionPipeline.run', () => {
     // A realistic Soroban resource fee: the prepared inner fee is the
     // inclusion fee plus this, far above the old fixed 1,000-stroop default.
     jest.spyOn(rpc.Server.prototype, 'simulateTransaction').mockResolvedValue(simSuccess('50000'));
+    // The default fee-rejection bump reads current fee stats (#767).
+    jest.spyOn(rpc.Server.prototype, 'getFeeStats').mockResolvedValue({
+      latestLedger: 100,
+      inclusionFee: { p90: '500' },
+      sorobanInclusionFee: { p90: '600' },
+    } as unknown as rpc.Api.GetFeeStatsResponse);
 
     const sendSpy = jest
       .spyOn(rpc.Server.prototype, 'sendTransaction')
@@ -1298,6 +1304,117 @@ describe('TransactionPipeline abort (#766)', () => {
     expect(result.ok).toBe(false);
     expect(sendSpy).toHaveBeenCalledTimes(1);
     expect(feeStatsSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ── fee-rejection bump fee (#767) ────────────────────────────────────────────
+
+describe('TransactionPipeline fee-rejection bump fee (#767)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  /** Submits once with TRY_AGAIN_LATER, then accepts the fee-bump envelope. */
+  function mockFeeRejection(source: Keypair) {
+    jest
+      .spyOn(rpc.Server.prototype, 'getAccount')
+      .mockResolvedValue(new Account(source.publicKey(), '100'));
+    jest.spyOn(rpc.Server.prototype, 'simulateTransaction').mockResolvedValue(simSuccess('500'));
+    jest
+      .spyOn(rpc.Server.prototype, 'getTransaction')
+      .mockResolvedValue({
+        status: rpc.Api.GetTransactionStatus.SUCCESS,
+        ledger: 9,
+      } as unknown as rpc.Api.GetTransactionResponse);
+    return jest
+      .spyOn(rpc.Server.prototype, 'sendTransaction')
+      .mockResolvedValueOnce({
+        status: 'TRY_AGAIN_LATER',
+        hash: 'rejected',
+        latestLedger: 1,
+        latestLedgerCloseTime: 1,
+      } as rpc.Api.SendTransactionResponse)
+      .mockResolvedValueOnce({
+        status: 'PENDING',
+        hash: 'bumped',
+        latestLedger: 2,
+        latestLedgerCloseTime: 2,
+      } as rpc.Api.SendTransactionResponse);
+  }
+
+  function runWithFeeBump(
+    source: Keypair,
+    feeBump: { feeSource: Keypair; baseFee?: string },
+    onFeeBump: (event: { reason: string; baseFee: string; attempt: number }) => void,
+  ) {
+    return new TransactionPipeline(makeClient()).run({
+      sourceAccount: source.publicKey(),
+      operations: [new Contract(CONTRACT_ID).call('increment')],
+      signers: [source],
+      prepare: { maxAttempts: 1 },
+      submit: { maxAttempts: 1, pollIntervalMs: 1, feeBump: { ...feeBump, onFeeBump } },
+    });
+  }
+
+  it('bumps from current fee stats when no baseFee is pinned', async () => {
+    const source = Keypair.random();
+    const sendSpy = mockFeeRejection(source);
+    jest.spyOn(rpc.Server.prototype, 'getFeeStats').mockResolvedValue({
+      latestLedger: 1,
+      inclusionFee: { p90: '100' },
+      sorobanInclusionFee: { p90: '10000000' },
+    } as unknown as rpc.Api.GetFeeStatsResponse);
+    const notifications: Array<{ reason: string; baseFee: string; attempt: number }> = [];
+
+    const result = await runWithFeeBump(source, { feeSource: Keypair.random() }, (event) =>
+      notifications.push(event),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(sendSpy).toHaveBeenCalledTimes(2);
+    // Twice the network's current p90, well above the fee the node rejected.
+    expect(notifications).toEqual([
+      expect.objectContaining({ reason: 'fee-rejection', attempt: 1, baseFee: '20000000' }),
+    ]);
+  });
+
+  it('keeps a pinned baseFee exactly as given and does not read fee stats', async () => {
+    const source = Keypair.random();
+    mockFeeRejection(source);
+    const feeStatsSpy = jest.spyOn(rpc.Server.prototype, 'getFeeStats').mockResolvedValue({
+      latestLedger: 1,
+      inclusionFee: { p90: '100' },
+      sorobanInclusionFee: { p90: '100' },
+    } as unknown as rpc.Api.GetFeeStatsResponse);
+    const notifications: Array<{ reason: string; baseFee: string; attempt: number }> = [];
+
+    const result = await runWithFeeBump(
+      source,
+      { feeSource: Keypair.random(), baseFee: '5000' },
+      (event) => notifications.push(event),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(feeStatsSpy).not.toHaveBeenCalled();
+    expect(notifications).toEqual([
+      expect.objectContaining({ reason: 'fee-rejection', baseFee: '5000' }),
+    ]);
+  });
+
+  it('falls back to the rejected fee when fee stats are unavailable', async () => {
+    const source = Keypair.random();
+    const sendSpy = mockFeeRejection(source);
+    jest
+      .spyOn(rpc.Server.prototype, 'getFeeStats')
+      .mockRejectedValue(new Error('rpc down'));
+    const notifications: Array<{ reason: string; baseFee: string; attempt: number }> = [];
+
+    const result = await runWithFeeBump(source, { feeSource: Keypair.random() }, (event) =>
+      notifications.push(event),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(sendSpy).toHaveBeenCalledTimes(2);
+    const rejected = sendSpy.mock.calls[0][0] as Transaction;
+    expect(notifications[0].baseFee).toBe(rejected.fee);
   });
 });
 

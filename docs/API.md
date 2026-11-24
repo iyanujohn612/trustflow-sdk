@@ -771,7 +771,8 @@ callers get a typed, actionable `error.code` (e.g. `ASSEMBLY_ERROR`, `SIMULATION
 - `.run(params)` — convenience method chaining assemble → prepare → sign → submit; when
   submission fails for a fee-related reason (`TRY_AGAIN_LATER`, insufficient fee) and
   `submit.feeBump` is configured, automatically builds, signs, and resubmits a fee-bump
-  transaction before giving up
+  transaction before giving up. Without a pinned `baseFee`, that bump escalates from current
+  Soroban RPC fee stats rather than the fee the node just rejected (#767)
 
 ```typescript
 import { TransactionPipeline, TrustFlowClient } from '@trustflow/sdk';
