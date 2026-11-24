@@ -40,6 +40,13 @@ const DEFAULT_RETRY_POLICY: Required<Omit<RetryPolicy, 'timeoutMs'>> = {
 
 const DEFAULT_POLL_INTERVAL_MS = 1500;
 const DEFAULT_POLL_ATTEMPTS = 10;
+/**
+ * Lookups made for a transaction the node rejected with `txBAD_SEQ`, before
+ * concluding that it never landed (#765).
+ */
+const LANDED_LOOKUP_ATTEMPTS = 3;
+/** `txBAD_SEQ` in the Stellar XDR `TransactionResultCode` enum. */
+const TX_BAD_SEQ_RESULT_CODE = -5;
 
 function ok<T>(data: T): PipelineResult<T> {
   return { ok: true, data };
@@ -91,6 +98,20 @@ function isConfirmationPollTimeout(error: unknown): boolean {
     return isConfirmationPollTimeout(error.cause);
   }
   return false;
+}
+
+/**
+ * True when a node `ERROR` response carries the `txBAD_SEQ` result code. Reads
+ * the typed XDR, because the error message only names the transaction hash.
+ */
+function hasBadSequenceResult(errorResult: unknown): boolean {
+  try {
+    const result = errorResult as xdr.TransactionResult | undefined;
+    const code = result?.result().switch() as unknown as { value?: unknown } | undefined;
+    return code?.value === TX_BAD_SEQ_RESULT_CODE;
+  } catch {
+    return false;
+  }
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -602,6 +623,55 @@ export class TransactionPipeline {
     return result;
   }
 
+  /**
+   * Looks up a transaction the node rejected with `txBAD_SEQ`, to see whether
+   * an earlier broadcast of the same envelope already landed (#765). Returns
+   * `undefined` when it is not on ledger after a few lookups, so the rejection
+   * stands. A landed transaction that failed on-chain is a terminal error.
+   */
+  private async findLandedLedger(
+    hash: string,
+    options?: SubmitOptions,
+  ): Promise<{ ledger?: number } | undefined> {
+    const intervalMs = options?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    for (let i = 0; i < LANDED_LOOKUP_ATTEMPTS; i++) {
+      const lookup = await withRetry(
+        () => this.server.getTransaction(hash),
+        options,
+        'submit.poll',
+        this.client.timeoutMs,
+      );
+      if (!lookup.ok) return undefined;
+      if (lookup.data.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+        return { ledger: lookup.data.ledger };
+      }
+      if (lookup.data.status === rpc.Api.GetTransactionStatus.FAILED) {
+        // Already on ledger and failed: resending would re-run the operation,
+        // so this is terminal rather than a sequence problem.
+        throw TrustFlowError.submissionFailed(`transaction ${hash} failed on-chain`);
+      }
+      if (i < LANDED_LOOKUP_ATTEMPTS - 1) {
+        await sleep(intervalMs);
+      }
+    }
+    return undefined;
+  }
+
+  private submissionResult(
+    tx: SubmittableTransaction,
+    hash: string,
+    attempts: number,
+    ledger?: number,
+  ): PipelineSubmission {
+    return {
+      hash,
+      ledger,
+      feeBumped: tx instanceof FeeBumpTransaction,
+      attempts,
+      feeCharged: tx.fee,
+    };
+  }
+
   private async notifyFeeBump(options: FeeBumpOptions, event: FeeBumpEvent): Promise<void> {
     try {
       await options.onFeeBump?.(event);
@@ -638,6 +708,16 @@ export class TransactionPipeline {
         );
 
         if (sendResult.status === 'ERROR') {
+          if (hasBadSequenceResult(sendResult.errorResult)) {
+            // The envelope is byte-identical to one already broadcast, so an
+            // earlier send probably landed and consumed the sequence number.
+            // Report that result rather than rebuilding a new transaction, which
+            // would run the operation a second time (#765).
+            const landed = await this.findLandedLedger(sendResult.hash, options);
+            if (landed) {
+              return this.submissionResult(tx, sendResult.hash, attempt, landed.ledger);
+            }
+          }
           // Terminal: the node evaluated and rejected this envelope.
           throw TrustFlowError.submissionFailed(
             `node rejected transaction (${sendResult.hash})`,
@@ -651,14 +731,7 @@ export class TransactionPipeline {
         }
 
         const ledger = await this.pollForConfirmation(sendResult.hash, options);
-
-        return {
-          hash: sendResult.hash,
-          ledger,
-          feeBumped: tx instanceof FeeBumpTransaction,
-          attempts: attempt,
-          feeCharged: tx.fee,
-        };
+        return this.submissionResult(tx, sendResult.hash, attempt, ledger);
       },
       { ...options, timeoutMs: undefined },
       'submit',

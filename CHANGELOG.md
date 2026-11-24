@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Transaction pipeline: duplicate submits, abort, fee-rejection bumps and progress (#765, #766, #767, #768)
+
+- Issue #765: A resubmitted envelope that the node rejects with `txBAD_SEQ` now resolves as success when a lookup shows an earlier broadcast of it landed. `submit()` returns that ledger, so an idempotent retry no longer throws. Before, `run()` treated the rejection as a stale sequence and rebuilt a new transaction, which could run the operation a second time. An envelope that is not on ledger keeps its `SUBMISSION_ERROR`.
+
 ### Dispute status polling, deadline validation and Node entry spike (#711, #780, #781, #783)
 
 - Issue #783: Added `useDisputeStatus(source, escrowId, { interval, pauseWhenHidden })` to `@trustflow/sdk/react`, built on `usePolling`. It pauses while the tab is hidden and fetches once when the tab is shown again, so background tabs stop sending requests. Polling stops once the dispute is `resolved` or `cancelled`. The issue's hook did not exist in `src/` before this change.
