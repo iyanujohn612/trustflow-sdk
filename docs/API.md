@@ -767,7 +767,9 @@ callers get a typed, actionable `error.code` (e.g. `ASSEMBLY_ERROR`, `SIMULATION
   A `txBAD_SEQ` rejection of an envelope that is already on ledger resolves as success with
   the original ledger (#765). Pass `signal` (an `AbortSignal`) to stop confirmation polling and
   further fee bumps. An aborted submission resolves with a `SUBMISSION_ERROR` that names the
-  hash, and the transaction may still confirm (#766).
+  hash, and the transaction may still confirm (#766). `onProgress(stage)` is called once with
+  `broadcasting` when the envelope is sent and once with `confirming` when polling starts, so a
+  UI can show where a submission is. A fee-bump escalation reports both again (#768).
 - `.run(params)` — convenience method chaining assemble → prepare → sign → submit; when
   submission fails for a fee-related reason (`TRY_AGAIN_LATER`, insufficient fee) and
   `submit.feeBump` is configured, automatically builds, signs, and resubmits a fee-bump

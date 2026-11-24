@@ -23,6 +23,7 @@ import type {
   FeeEstimate,
   FeeRange,
   PipelineResult,
+  PipelineStage,
   PipelineSubmission,
   PrepareOptions,
   RetryPolicy,
@@ -750,6 +751,16 @@ export class TransactionPipeline {
     };
   }
 
+  /** Reports a stage to `onProgress`. A throwing callback is logged, never rethrown. */
+  private reportProgress(options: SubmitOptions | undefined, stage: PipelineStage): void {
+    if (!options?.onProgress) return;
+    try {
+      options.onProgress(stage);
+    } catch (error) {
+      this.pipelineLogger.warn('Progress callback failed', { error });
+    }
+  }
+
   private async notifyFeeBump(options: FeeBumpOptions, event: FeeBumpEvent): Promise<void> {
     try {
       await options.onFeeBump?.(event);
@@ -773,6 +784,15 @@ export class TransactionPipeline {
     // `pollTimeoutMs` / `confirmTimeoutMs` (#764). Each `getTransaction` poll
     // is bounded separately inside `pollForConfirmation`.
     const rpcTimeoutMs = options?.timeoutMs ?? this.client.timeoutMs;
+    // Each stage is reported once, however many attempts run inside it: a
+    // `TRY_AGAIN_LATER` replay stays in `broadcasting`.
+    let stage: PipelineStage | undefined;
+    const enterStage = (next: PipelineStage): void => {
+      if (next === stage) return;
+      stage = next;
+      this.reportProgress(options, next);
+    };
+
     return withRetry(
       async (attempt) => {
         if (options?.signal?.aborted) {
@@ -780,6 +800,7 @@ export class TransactionPipeline {
           throw abortedError();
         }
 
+        enterStage('broadcasting');
         this.pipelineLogger.debug('Sending transaction to network', {
           attempt,
           hash: tx.hash?.toString(),
@@ -813,6 +834,7 @@ export class TransactionPipeline {
           throw markTransient(TrustFlowError.submissionFailed('node reported TRY_AGAIN_LATER'));
         }
 
+        enterStage('confirming');
         const ledger = await this.pollForConfirmation(sendResult.hash, options);
         return this.submissionResult(tx, sendResult.hash, attempt, ledger);
       },

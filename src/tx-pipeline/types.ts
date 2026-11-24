@@ -170,7 +170,21 @@ export interface SubmitOptions extends RetryPolicy {
    * which may still confirm.
    */
   signal?: AbortSignal;
+  /**
+   * Called once per stage transition: `broadcasting` when the envelope is
+   * sent and `confirming` when the pipeline starts polling for it. Each
+   * fee-bump escalation reports its own `broadcasting` and `confirming`.
+   * Omitting the callback has no effect on the submission. An error thrown
+   * by the callback is logged and does not change the result.
+   */
+  onProgress?: (stage: PipelineStage) => void;
 }
+
+/**
+ * Stages reported to {@link SubmitOptions.onProgress}. Assembly, simulation
+ * and signing run before `submit()`, so they are not reported.
+ */
+export type PipelineStage = 'broadcasting' | 'confirming';
 
 /** Outcome of a successfully confirmed submission. */
 export interface PipelineSubmission {

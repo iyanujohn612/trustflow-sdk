@@ -1418,3 +1418,121 @@ describe('TransactionPipeline fee-rejection bump fee (#767)', () => {
   });
 });
 
+// ── stage progress (#768) ────────────────────────────────────────────────────
+
+describe('TransactionPipeline onProgress (#768)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  function signedTx(): Transaction {
+    const keypair = Keypair.random();
+    const tx = buildUnsignedTx(keypair.publicKey());
+    tx.sign(keypair);
+    return tx;
+  }
+
+  function send(
+    status: 'PENDING' | 'TRY_AGAIN_LATER',
+    hash = 'progress-hash',
+  ): rpc.Api.SendTransactionResponse {
+    return {
+      status,
+      hash,
+      latestLedger: 1,
+      latestLedgerCloseTime: 1,
+    } as rpc.Api.SendTransactionResponse;
+  }
+
+  function txStatus(status: rpc.Api.GetTransactionStatus, ledger?: number) {
+    return { status, ledger } as unknown as rpc.Api.GetTransactionResponse;
+  }
+
+  function feeStats() {
+    return {
+      latestLedger: 100,
+      inclusionFee: { p90: '500' },
+      sorobanInclusionFee: { p90: '600' },
+    } as unknown as rpc.Api.GetFeeStatsResponse;
+  }
+
+  it('reports broadcasting then confirming, once each, in order', async () => {
+    jest.spyOn(rpc.Server.prototype, 'sendTransaction').mockResolvedValue(send('PENDING'));
+    jest
+      .spyOn(rpc.Server.prototype, 'getTransaction')
+      .mockResolvedValueOnce(txStatus(rpc.Api.GetTransactionStatus.NOT_FOUND))
+      .mockResolvedValueOnce(txStatus(rpc.Api.GetTransactionStatus.SUCCESS, 7));
+    const stages: string[] = [];
+
+    const result = await new TransactionPipeline(makeClient()).submit(signedTx(), {
+      maxAttempts: 1,
+      pollIntervalMs: 1,
+      onProgress: (stage) => stages.push(stage),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(stages).toEqual(['broadcasting', 'confirming']);
+  });
+
+  it('reports a TRY_AGAIN_LATER replay as the same broadcasting stage', async () => {
+    jest
+      .spyOn(rpc.Server.prototype, 'sendTransaction')
+      .mockResolvedValueOnce(send('TRY_AGAIN_LATER'))
+      .mockResolvedValueOnce(send('PENDING'));
+    jest
+      .spyOn(rpc.Server.prototype, 'getTransaction')
+      .mockResolvedValue(txStatus(rpc.Api.GetTransactionStatus.SUCCESS, 7));
+    const stages: string[] = [];
+
+    const result = await new TransactionPipeline(makeClient()).submit(signedTx(), {
+      maxAttempts: 2,
+      baseDelayMs: 1,
+      maxDelayMs: 1,
+      pollIntervalMs: 1,
+      onProgress: (stage) => stages.push(stage),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(stages).toEqual(['broadcasting', 'confirming']);
+  });
+
+  it('reports each escalated broadcast as a new transition', async () => {
+    const sendSpy = jest
+      .spyOn(rpc.Server.prototype, 'sendTransaction')
+      .mockResolvedValueOnce(send('PENDING', 'original'))
+      .mockResolvedValueOnce(send('PENDING', 'bumped'));
+    jest
+      .spyOn(rpc.Server.prototype, 'getTransaction')
+      .mockResolvedValueOnce(txStatus(rpc.Api.GetTransactionStatus.NOT_FOUND))
+      .mockResolvedValueOnce(txStatus(rpc.Api.GetTransactionStatus.SUCCESS, 8));
+    jest.spyOn(rpc.Server.prototype, 'getFeeStats').mockResolvedValue(feeStats());
+    const stages: string[] = [];
+
+    const result = await new TransactionPipeline(makeClient()).submit(signedTx(), {
+      maxAttempts: 1,
+      pollAttempts: 1,
+      pollIntervalMs: 1,
+      onProgress: (stage) => stages.push(stage),
+      feeBump: { feeSource: Keypair.random(), maxFeeBump: 1 },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(sendSpy).toHaveBeenCalledTimes(2);
+    expect(stages).toEqual(['broadcasting', 'confirming', 'broadcasting', 'confirming']);
+  });
+
+  it('ignores a progress callback that throws', async () => {
+    jest.spyOn(rpc.Server.prototype, 'sendTransaction').mockResolvedValue(send('PENDING'));
+    jest
+      .spyOn(rpc.Server.prototype, 'getTransaction')
+      .mockResolvedValue(txStatus(rpc.Api.GetTransactionStatus.SUCCESS, 7));
+
+    const result = await new TransactionPipeline(makeClient()).submit(signedTx(), {
+      maxAttempts: 1,
+      pollIntervalMs: 1,
+      onProgress: () => {
+        throw new Error('ui crashed');
+      },
+    });
+
+    expect(result.ok).toBe(true);
+  });
+});
