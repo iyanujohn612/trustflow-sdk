@@ -101,6 +101,37 @@ function isConfirmationPollTimeout(error: unknown): boolean {
 }
 
 /**
+ * Waits for `ms`, or until `signal` aborts, whichever comes first. It does not
+ * throw on abort; the caller checks the signal itself.
+ */
+async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal?.addEventListener('abort', finish, { once: true });
+  });
+}
+
+/**
+ * The error a submission resolves with once `SubmitOptions.signal` aborts. It
+ * is marked non-retryable: `classifyFailure` would otherwise treat it as a
+ * transport failure, because it carries no code and no cause.
+ *
+ * @param hash - Hash of the broadcast envelope, when one was already broadcast
+ */
+function abortedError(hash?: string): TrustFlowError {
+  const detail =
+    hash === undefined
+      ? 'aborted before broadcast'
+      : `aborted while confirming ${hash}; the transaction may still confirm`;
+  return markTransient(TrustFlowError.submissionFailed(detail), false);
+}
+
+/**
  * True when a node `ERROR` response carries the `txBAD_SEQ` result code. Reads
  * the typed XDR, because the error message only names the transaction hash.
  */
@@ -112,10 +143,6 @@ function hasBadSequenceResult(errorResult: unknown): boolean {
   } catch {
     return false;
   }
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -216,9 +243,9 @@ async function withRetry<T>(
  * parallel. The queue is shared by every `TransactionPipeline` in the current
  * process; it does not coordinate across processes or machines, and the
  * low-level `assemble`/`submit` methods bypass it. Use `queueTimeoutMs` to fail
- * with a `TIMEOUT` error instead of waiting behind a stuck run. There is no
- * abort signal yet, so a run that has started keeps the queue until it reaches
- * a terminal state.
+ * with a `TIMEOUT` error instead of waiting behind a stuck run. A run that has
+ * started keeps the queue until it reaches a terminal state; passing
+ * `submit.signal` ends its confirmation wait early.
  *
  * Every method returns a {@link PipelineResult}, never throws for expected
  * failure modes, so callers get typed, actionable errors without try/catch.
@@ -561,6 +588,9 @@ export class TransactionPipeline {
     const multiplierBps = BigInt(Math.round(multiplier * 10_000));
 
     for (let bumpNumber = 1; bumpNumber <= maxFeeBump; bumpNumber++) {
+      // An aborted caller gets no further envelopes.
+      if (options?.signal?.aborted) return result;
+
       const stats = await withRetry(
         () => this.server.getFeeStats(),
         options,
@@ -635,6 +665,8 @@ export class TransactionPipeline {
   ): Promise<{ ledger?: number } | undefined> {
     const intervalMs = options?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     for (let i = 0; i < LANDED_LOOKUP_ATTEMPTS; i++) {
+      if (options?.signal?.aborted) return undefined;
+
       const lookup = await withRetry(
         () => this.server.getTransaction(hash),
         options,
@@ -651,7 +683,7 @@ export class TransactionPipeline {
         throw TrustFlowError.submissionFailed(`transaction ${hash} failed on-chain`);
       }
       if (i < LANDED_LOOKUP_ATTEMPTS - 1) {
-        await sleep(intervalMs);
+        await sleep(intervalMs, options?.signal);
       }
     }
     return undefined;
@@ -697,6 +729,11 @@ export class TransactionPipeline {
     const rpcTimeoutMs = options?.timeoutMs ?? this.client.timeoutMs;
     return withRetry(
       async (attempt) => {
+        if (options?.signal?.aborted) {
+          // Nothing has been broadcast yet, so there is no hash to report.
+          throw abortedError();
+        }
+
         this.pipelineLogger.debug('Sending transaction to network', {
           attempt,
           hash: tx.hash?.toString(),
@@ -814,6 +851,12 @@ export class TransactionPipeline {
     }
 
     this.pipelineLogger.warn('Transaction submission failed', { error: submitted.error.message });
+
+    // An aborted caller must not get a rebuilt or fee-bumped transaction sent
+    // on its behalf.
+    if (params.submit?.signal?.aborted) {
+      return submitted;
+    }
 
     // Bad-sequence recovery: if the node rejected with tx_bad_seq, the cached
     // sequence number diverged from the real on-chain value (e.g. an external
@@ -963,6 +1006,8 @@ export class TransactionPipeline {
     });
 
     for (let i = 0; i < attempts; i++) {
+      // Checked every iteration so an aborted caller stops polling promptly (#766).
+      if (options?.signal?.aborted) throw abortedError(hash);
       if (deadlineExpired()) throwDeadline();
 
       const result = await withRetry(
@@ -989,7 +1034,7 @@ export class TransactionPipeline {
       if (i < attempts - 1) {
         // Cap the sleep so a long interval still observes the deadline promptly.
         const remaining = deadline === undefined ? intervalMs : Math.max(0, deadline - Date.now());
-        await sleep(Math.min(intervalMs, remaining));
+        await sleep(Math.min(intervalMs, remaining), options?.signal);
       }
     }
 

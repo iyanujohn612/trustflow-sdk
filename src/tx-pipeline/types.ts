@@ -156,6 +156,15 @@ export interface SubmitOptions extends RetryPolicy {
    * this configuration.
    */
   feeBump?: FeeBumpOptions;
+  /**
+   * Aborts the submission. Checked before each broadcast, before every
+   * confirmation poll and during the wait between polls, so a stalled wait
+   * ends promptly; no further fee-bump envelopes are sent either. An aborted
+   * submission resolves with a `SUBMISSION_ERROR` whose message names the
+   * hash. Aborting does not cancel a transaction that was already broadcast,
+   * which may still confirm.
+   */
+  signal?: AbortSignal;
 }
 
 /** Outcome of a successfully confirmed submission. */

@@ -1208,3 +1208,96 @@ describe('TransactionPipeline duplicate submission (#765)', () => {
   });
 });
 
+// ── abort (#766) ─────────────────────────────────────────────────────────────
+
+describe('TransactionPipeline abort (#766)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  function signedTx(): Transaction {
+    const keypair = Keypair.random();
+    const tx = buildUnsignedTx(keypair.publicKey());
+    tx.sign(keypair);
+    return tx;
+  }
+
+  function pendingSend(hash: string): rpc.Api.SendTransactionResponse {
+    return {
+      status: 'PENDING',
+      hash,
+      latestLedger: 1,
+      latestLedgerCloseTime: 1,
+    } as rpc.Api.SendTransactionResponse;
+  }
+
+  function notFound(): rpc.Api.GetTransactionResponse {
+    return {
+      status: rpc.Api.GetTransactionStatus.NOT_FOUND,
+    } as unknown as rpc.Api.GetTransactionResponse;
+  }
+
+  it('stops polling promptly when the caller aborts during the wait between polls', async () => {
+    const controller = new AbortController();
+    jest.spyOn(rpc.Server.prototype, 'sendTransaction').mockResolvedValue(pendingSend('abort-me'));
+    const getSpy = jest
+      .spyOn(rpc.Server.prototype, 'getTransaction')
+      .mockResolvedValue(notFound());
+    // Each wait is a minute long, so the abort has to interrupt it.
+    setTimeout(() => controller.abort(), 20);
+
+    const startedAt = Date.now();
+    const result = await new TransactionPipeline(makeClient()).submit(signedTx(), {
+      maxAttempts: 1,
+      pollIntervalMs: 60_000,
+      signal: controller.signal,
+    });
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('SUBMISSION_ERROR');
+    // The hash is named so the caller can check it later.
+    expect(result.error.message).toContain('abort-me');
+    expect(getSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not broadcast when the signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const sendSpy = jest.spyOn(rpc.Server.prototype, 'sendTransaction');
+
+    const result = await new TransactionPipeline(makeClient()).submit(signedTx(), {
+      maxAttempts: 1,
+      signal: controller.signal,
+    });
+
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.message).toContain('aborted before broadcast');
+  });
+
+  it('sends no further fee-bump envelope after an abort', async () => {
+    const controller = new AbortController();
+    const sendSpy = jest
+      .spyOn(rpc.Server.prototype, 'sendTransaction')
+      .mockResolvedValue(pendingSend('original'));
+    jest.spyOn(rpc.Server.prototype, 'getTransaction').mockImplementation(async () => {
+      controller.abort();
+      return notFound();
+    });
+    const feeStatsSpy = jest.spyOn(rpc.Server.prototype, 'getFeeStats');
+
+    const result = await new TransactionPipeline(makeClient()).submit(signedTx(), {
+      maxAttempts: 1,
+      pollAttempts: 1,
+      pollIntervalMs: 1,
+      signal: controller.signal,
+      feeBump: { feeSource: Keypair.random(), maxFeeBump: 2 },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(feeStatsSpy).not.toHaveBeenCalled();
+  });
+});
+

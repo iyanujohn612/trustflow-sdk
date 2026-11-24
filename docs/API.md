@@ -765,7 +765,9 @@ callers get a typed, actionable `error.code` (e.g. `ASSEMBLY_ERROR`, `SIMULATION
   out. Each step reads the latest Soroban RPC p90 inclusion fee and multiplies the previous
   base fee (default multiplier: 2); `onFeeBump` receives the old/new hashes and fee details.
   A `txBAD_SEQ` rejection of an envelope that is already on ledger resolves as success with
-  the original ledger (#765).
+  the original ledger (#765). Pass `signal` (an `AbortSignal`) to stop confirmation polling and
+  further fee bumps. An aborted submission resolves with a `SUBMISSION_ERROR` that names the
+  hash, and the transaction may still confirm (#766).
 - `.run(params)` — convenience method chaining assemble → prepare → sign → submit; when
   submission fails for a fee-related reason (`TRY_AGAIN_LATER`, insufficient fee) and
   `submit.feeBump` is configured, automatically builds, signs, and resubmits a fee-bump
