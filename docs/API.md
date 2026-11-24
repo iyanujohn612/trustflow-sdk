@@ -188,7 +188,7 @@ const gigB = template.setAmount('20').build();
 gigA.amountXLM; // '10' — unaffected by gigB
 ```
 
-Throws `TrustFlowError` (`VALIDATION_ERROR`) when a required field is missing.
+Throws `TrustFlowError` (`VALIDATION_ERROR`) when a required field is missing. A deadline set with `setDeadline(blocks)` must be a positive whole number of ledgers. `build()` rejects `0`, negative, fractional and non-finite values with `error.field === 'deadlineBlocks'` (#711), instead of letting the contract reject them at submission.
 
 ## EscrowMonitor
 - `.on(event, handler)` — subscribe to escrow events; `handler` is narrowed to that event's payload
@@ -1061,6 +1061,16 @@ const { profile, loading, error, update } = useProfile(profileClient, address);
 Fetches and manages a user's profile from the backend API:
 - Automatically re-fetches when `address` changes, resetting state appropriately.
 - `update(params)` — updates the user's profile via `ProfileClient.updateProfile`.
+
+### `useDisputeStatus` (#783)
+```typescript
+const { dispute, status, loading, error, refresh } = useDisputeStatus(disputeClient, escrowId, { interval: 5000 });
+```
+Polls the backend for a dispute's status, built on `usePolling`:
+- Polling **pauses while the tab is hidden** and fetches once when the tab is shown again. Pass `pauseWhenHidden: false` to keep polling in the background.
+- Polling stops once the dispute is `resolved` or `cancelled`.
+- `source` is anything with `getDispute(escrowId)`, so a `DisputeClient` works directly. Pass `null` as `escrowId` to stay idle.
+- A failed fetch sets `error` and polling continues, so a transient outage recovers on its own.
 
 ### `useJuror`
 ```typescript

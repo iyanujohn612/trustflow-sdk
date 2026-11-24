@@ -11,6 +11,8 @@ export { usePolling } from './usePolling';
 export type { UsePollingOptions, UsePollingResult } from './usePolling';
 export { useMultiSigOperation } from './useMultiSigOperation';
 export type { MultiSigOperationSource, UseMultiSigOperationOptions } from './useMultiSigOperation';
+export { useDisputeStatus } from './useDisputeStatus';
+export type { DisputeStatusSource, UseDisputeStatusOptions } from './useDisputeStatus';
 export { useDeliverableUpload } from './useDeliverableUpload';
 export type {
   DeliverableUploader,

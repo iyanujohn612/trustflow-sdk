@@ -140,6 +140,35 @@ describe('EscrowBuilder', () => {
     }
   });
 
+  it.each([-100, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects deadline %p at build() with VALIDATION_ERROR (#711)',
+    (deadline) => {
+      const builder = new EscrowBuilder()
+        .setDepositor(DEPOSITOR)
+        .setBeneficiary(BENEFICIARY)
+        .setAmount('10')
+        .setDeadline(deadline);
+
+      expect(() => builder.build()).toThrow(TrustFlowError);
+      try {
+        builder.build();
+      } catch (err: any) {
+        expect(err.code).toBe('VALIDATION_ERROR');
+        expect(err.field).toBe('deadlineBlocks');
+      }
+    },
+  );
+
+  it('accepts a positive whole-number deadline and omits it when unset (#711)', () => {
+    const base = new EscrowBuilder()
+      .setDepositor(DEPOSITOR)
+      .setBeneficiary(BENEFICIARY)
+      .setAmount('10');
+
+    expect(base.build().deadlineBlocks).toBeUndefined();
+    expect(base.setDeadline(1).build().deadlineBlocks).toBe(1);
+  });
+
   it('returns an independent copy safe from subsequent builder mutations', () => {
     const builder = new EscrowBuilder()
       .withDepositor(DEPOSITOR)

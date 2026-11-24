@@ -419,3 +419,25 @@ describe('useEscrow — overlapping calls guard (#473)', () => {
     expect(result.current.loading).toBe(false);
   });
 });
+
+describe('useEscrow — re-renders (#781)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  // #781 describes `useEscrow(id, { network })` with an inline options object.
+  // This hook takes only a client and fetches only when asked, so re-rendering
+  // with a new client object must never reach the escrow functions. This guards
+  // against adding an automatic fetch that depends on the client's identity.
+  it('makes no escrow calls when re-rendered with new inline client objects', () => {
+    const { rerender } = renderHook(({ c }) => useEscrow(c), {
+      initialProps: { c: { network: 'TESTNET' } as never },
+    });
+    rerender({ c: { network: 'TESTNET' } as never });
+    rerender({ c: { network: 'TESTNET' } as never });
+
+    expect(mockGet).not.toHaveBeenCalled();
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(mockRelease).not.toHaveBeenCalled();
+    expect(mockCancel).not.toHaveBeenCalled();
+    expect(mockDispute).not.toHaveBeenCalled();
+  });
+});

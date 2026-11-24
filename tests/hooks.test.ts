@@ -9,6 +9,7 @@ describe('hooks barrel', () => {
     'useEscrow',
     'useProfile',
     'useJuror',
+    'useDisputeStatus',
   ])('exports %s', (name) => {
     expect(typeof (hooks as unknown as Record<string, unknown>)[name]).toBe('function');
   });

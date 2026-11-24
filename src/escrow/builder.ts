@@ -74,7 +74,8 @@ export class EscrowBuilder {
    * depositor) and call `build()` once per gig.
    *
    * @throws {TrustFlowError} `VALIDATION_ERROR` when `depositor`, `beneficiary`
-   * or `amountXLM` is missing, when `arbitrator` is invalid, when milestone
+   * or `amountXLM` is missing, when `deadlineBlocks` (set via `setDeadline`) is
+   * not a positive whole number, when `arbitrator` is invalid, when milestone
    * amounts are invalid/exceed total amount, or when milestone deadlines are
    * not chronological or in the past.
    */
@@ -87,6 +88,18 @@ export class EscrowBuilder {
     }
     if (!this.params.amountXLM) {
       throw TrustFlowError.validation('amountXLM', 'amountXLM required');
+    }
+
+    // Rejected here, not at submission, where the contract only returns an opaque
+    // error (#711).
+    if (this.params.deadlineBlocks !== undefined) {
+      const blocks = this.params.deadlineBlocks;
+      if (!Number.isSafeInteger(blocks) || blocks <= 0) {
+        throw TrustFlowError.validation(
+          'deadlineBlocks',
+          `deadline must be a positive whole number of ledgers, got ${blocks}`,
+        );
+      }
     }
 
     if (this.params.arbitrator) {

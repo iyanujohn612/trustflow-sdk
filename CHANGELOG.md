@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Dispute status polling, deadline validation and Node entry spike (#711, #780, #781, #783)
+
+- Issue #783: Added `useDisputeStatus(source, escrowId, { interval, pauseWhenHidden })` to `@trustflow/sdk/react`, built on `usePolling`. It pauses while the tab is hidden and fetches once when the tab is shown again, so background tabs stop sending requests. Polling stops once the dispute is `resolved` or `cancelled`. The issue's hook did not exist in `src/` before this change.
+- Issue #711: `EscrowBuilder.build()` now throws `VALIDATION_ERROR` (`field: 'deadlineBlocks'`) when the deadline set with `setDeadline()` is zero, negative, fractional or not finite. Before, the bad value reached the contract and failed as an opaque contract error at submission.
+- Issue #781: Could not reproduce on the current code. `useEscrow` takes only a client and fetches only when asked, so no inline options object can cause a refetch. Added a regression test that re-rendering with new client objects makes no escrow calls.
+- Issue #780: Added the [Node entrypoint spike](docs/spikes/issue-780-node-entrypoint.md). Only `createHttpAgent`, `createHttpsAgent` and `configureAxiosConnectionPool` need Node. The `browser`, `workerd` and `edge-light` conditions already route `@trustflow/sdk/node` to a stub (#776). The spike recommends keeping the two entries separate. Bundle sizes were not measured.
+
 ### `useWallet` unmount guard (#782)
 
 - Issue #782: `useWallet()` no longer updates `wallet`, `loading`, `error` or `isRejected` when a `connect()` or `disconnect()` settles after its component has unmounted. The promise still resolves or rejects as before, and `disconnect()` still revokes stored sessions. React 18 and 19 no longer log a warning for this, so the change guards against the state update rather than fixing a visible warning.
